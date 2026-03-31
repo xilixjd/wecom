@@ -4,6 +4,8 @@ import {
   ensureDynamicAgentListed,
   generateAgentId,
   shouldUseDynamicAgent,
+  ensureDynamicWorkspaceSeeded,
+  getDynamicAgentConfig,
 } from "../dynamic-agent.js";
 import type { UnifiedInboundEvent } from "../types/index.js";
 
@@ -32,11 +34,23 @@ export function resolveRuntimeRoute(params: {
     return route;
   }
 
+  const sourceAgentId = route.agentId;
   const targetAgentId = generateAgentId(
     chatType,
     params.event.conversation.peerId,
     params.event.accountId,
   );
+
+  // 前置 seed workspace
+  const dynamicConfig = getDynamicAgentConfig(params.cfg);
+  if (dynamicConfig.workspaceSeed) {
+    ensureDynamicWorkspaceSeeded({
+      dynamicAgentId: targetAgentId,
+      sourceAgentId,
+      config: params.cfg,
+    });
+  }
+
   route.agentId = targetAgentId;
   route.sessionKey = `agent:${targetAgentId}:wecom:${params.event.accountId}:${chatType}:${params.event.conversation.peerId}`;
   ensureDynamicAgentListed(targetAgentId, params.core).catch(() => {});

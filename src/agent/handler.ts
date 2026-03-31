@@ -11,9 +11,12 @@ import type { WecomAccountRuntime } from "../app/account-runtime.js";
 import { resolveWecomMediaMaxBytes, shouldRejectWecomDefaultRoute } from "../config/index.js";
 import {
   buildAgentSessionTarget,
+  buildDynamicAgentInboundBody,
   generateAgentId,
   shouldUseDynamicAgent,
   ensureDynamicAgentListed,
+  ensureDynamicWorkspaceSeeded,
+  getDynamicAgentConfig,
 } from "../dynamic-agent.js";
 import { getWecomRuntime } from "../runtime.js";
 import { registerWecomSourceSnapshot } from "../runtime/source-registry.js";
@@ -654,11 +657,23 @@ async function processAgentMessage(params: {
   }
 
   if (useDynamicAgent) {
+    const sourceAgentId = route.agentId;
     const targetAgentId = generateAgentId(isGroup ? "group" : "dm", peerId, agent.accountId);
+
+    // 前置 seed workspace
+    const dynamicConfig = getDynamicAgentConfig(config);
+    if (dynamicConfig.workspaceSeed) {
+      ensureDynamicWorkspaceSeeded({
+        dynamicAgentId: targetAgentId,
+        sourceAgentId,
+        config,
+      });
+    }
+
     route.agentId = targetAgentId;
     route.sessionKey = `agent:${targetAgentId}:wecom:${agent.accountId}:${isGroup ? "group" : "dm"}:${peerId}`;
-    // 异步添加到 agents.list（不阻塞）
-    ensureDynamicAgentListed(targetAgentId, core).catch(() => {});
+    // 同步添加到 agents.list（确保 Core 能识别该 agent）
+    await ensureDynamicAgentListed(targetAgentId, core);
     log?.(`[wecom-agent] dynamic agent routing: ${targetAgentId}, sessionKey=${route.sessionKey}`);
   }
   // ===== 动态 Agent 路由注入结束 =====
@@ -678,6 +693,20 @@ async function processAgentMessage(params: {
     agentId: route.agentId,
   });
   const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(config);
+  const commandBody = finalContent;
+  const authz = await resolveWecomCommandAuthorization({
+    core,
+    cfg: config,
+    // Agent 门禁应读取 channels.wecom.agent.dm（即 agent.config.dm），而不是 channels.wecom.dm（不存在）
+    accountConfig: agent.config,
+    rawBody: commandBody,
+    senderUserId: fromUser,
+  });
+  const { modelInputBody } = buildDynamicAgentInboundBody({
+    agentId: route.agentId,
+    commandBody,
+    isCommand: authz.shouldComputeAuth,
+  });
   const previousTimestamp = core.channel.session.readSessionUpdatedAt({
     storePath,
     sessionKey: route.sessionKey,
@@ -687,16 +716,7 @@ async function processAgentMessage(params: {
     from: fromLabel,
     previousTimestamp,
     envelope: envelopeOptions,
-    body: finalContent,
-  });
-
-  const authz = await resolveWecomCommandAuthorization({
-    core,
-    cfg: config,
-    // Agent 门禁应读取 channels.wecom.agent.dm（即 agent.config.dm），而不是 channels.wecom.dm（不存在）
-    accountConfig: agent.config,
-    rawBody: finalContent,
-    senderUserId: fromUser,
+    body: modelInputBody,
   });
   log?.(
     `[wecom-agent] authz: dmPolicy=${authz.dmPolicy} shouldCompute=${authz.shouldComputeAuth} sender=${fromUser.toLowerCase()} senderAllowed=${authz.senderAllowed} authorizerConfigured=${authz.authorizerConfigured} commandAuthorized=${String(authz.commandAuthorized)}`,
@@ -733,8 +753,8 @@ async function processAgentMessage(params: {
   }
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
-    RawBody: finalContent,
-    CommandBody: finalContent,
+    RawBody: commandBody,
+    CommandBody: commandBody,
     Attachments: attachments.length > 0 ? attachments : undefined,
     From: isGroup ? `wecom:group:${peerId}` : `wecom:user:${fromUser}`,
     To: isGroup ? `wecom:group:${peerId}` : `wecom:user:${fromUser}`,
