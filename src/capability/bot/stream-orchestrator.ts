@@ -3,7 +3,14 @@ import { pathToFileURL } from "node:url";
 import type { PluginRuntime } from "openclaw/plugin-sdk";
 
 import { resolveWecomMediaMaxBytes, shouldRejectWecomDefaultRoute } from "../../config/index.js";
-import { ensureDynamicAgentListed, generateAgentId, shouldUseDynamicAgent } from "../../dynamic-agent.js";
+import {
+  buildDynamicAgentInboundBody,
+  ensureDynamicAgentListed,
+  generateAgentId,
+  shouldUseDynamicAgent,
+  ensureDynamicWorkspaceSeeded,
+  getDynamicAgentConfig,
+} from "../../dynamic-agent.js";
 import { LIMITS, type StreamStore } from "../../monitor/state.js";
 import { getWecomRuntime } from "../../runtime.js";
 import { buildWecomUnauthorizedCommandPrompt, resolveWecomCommandAuthorization } from "../../shared/command-auth.js";
@@ -200,7 +207,19 @@ export function createBotStreamOrchestrator(params: {
     }
 
     if (useDynamicAgent) {
+      const sourceAgentId = route.agentId;
       const targetAgentId = generateAgentId(chatType === "group" ? "group" : "dm", chatId, account.accountId);
+
+      // 前置 seed workspace
+      const dynamicConfig = getDynamicAgentConfig(config);
+      if (dynamicConfig.workspaceSeed) {
+        ensureDynamicWorkspaceSeeded({
+          dynamicAgentId: targetAgentId,
+          sourceAgentId,
+          config,
+        });
+      }
+
       route.agentId = targetAgentId;
       route.sessionKey = `agent:${targetAgentId}:wecom:${account.accountId}:${chatType === "group" ? "group" : "dm"}:${chatId}`;
       ensureDynamicAgentListed(targetAgentId, core).catch(() => { });
@@ -230,6 +249,19 @@ export function createBotStreamOrchestrator(params: {
     const fromLabel = chatType === "group" ? `group:${chatId}` : `user:${userId}`;
     const storePath = core.channel.session.resolveStorePath(config.session?.store, { agentId: route.agentId });
     const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(config);
+    const commandBody = rawBody;
+    const authz = await resolveWecomCommandAuthorization({
+      core,
+      cfg: config,
+      accountConfig: account.config,
+      rawBody: commandBody,
+      senderUserId: userId,
+    });
+    const { modelInputBody } = buildDynamicAgentInboundBody({
+      agentId: route.agentId,
+      commandBody,
+      isCommand: authz.shouldComputeAuth,
+    });
     const previousTimestamp = core.channel.session.readSessionUpdatedAt({
       storePath,
       sessionKey: route.sessionKey,
@@ -239,15 +271,7 @@ export function createBotStreamOrchestrator(params: {
       from: fromLabel,
       previousTimestamp,
       envelope: envelopeOptions,
-      body: rawBody,
-    });
-
-    const authz = await resolveWecomCommandAuthorization({
-      core,
-      cfg: config,
-      accountConfig: account.config,
-      rawBody,
-      senderUserId: userId,
+      body: modelInputBody,
     });
     const commandAuthorized = authz.commandAuthorized;
     logVerbose(
@@ -283,8 +307,8 @@ export function createBotStreamOrchestrator(params: {
 
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: body,
-      RawBody: rawBody,
-      CommandBody: rawBody,
+      RawBody: commandBody,
+      CommandBody: commandBody,
       Attachments: attachments,
       From: chatType === "group" ? `wecom:group:${chatId}` : `wecom:user:${userId}`,
       To: chatType === "group" ? `wecom:group:${chatId}` : `wecom:user:${chatId}`,
@@ -333,7 +357,7 @@ export function createBotStreamOrchestrator(params: {
         config,
         msg,
         streamId,
-        rawBody,
+        rawBody: commandBody,
         chatType,
         userId,
         core,
@@ -344,7 +368,7 @@ export function createBotStreamOrchestrator(params: {
       }),
     });
 
-    const rawBodyNormalized = rawBody.trim();
+    const rawBodyNormalized = commandBody.trim();
     const isResetCommand = /^\/(new|reset)(?:\s|$)/i.test(rawBodyNormalized);
     const resetCommandKind = isResetCommand ? (rawBodyNormalized.match(/^\/(new|reset)/i)?.[1]?.toLowerCase() ?? "new") : null;
 

@@ -117,5 +117,5 @@ pr34-monitor.log
 pr34-fix.log
 .openclaw
 package-lock.json
-.claude/settings.local.json
+.claude/
 nul
